@@ -283,6 +283,51 @@ static cairo_font_face_t *get_font_face(int which) {
 }
 
 /*
+ * Splits the given text by "newline", 
+ * And then draws the given text onto the cairo context.
+ */
+static void draw_text_multi_line(cairo_t *ctx, text_t text, double x) {
+    // get scaled_font
+    cairo_scaled_font_t *sft;
+    cairo_matrix_t fm, ctm;
+    cairo_matrix_init_scale(&fm, text.size, text.size);
+    cairo_get_matrix(ctx, &ctm);
+    cairo_font_options_t *opts;
+    opts = cairo_font_options_create();
+    sft = cairo_scaled_font_create(text.font, &fm, &ctm, opts);
+    cairo_font_options_destroy(opts);
+
+    // convert text to glyphs.
+    cairo_status_t status;
+    cairo_glyph_t* glyphs;
+    int nglyphs = 0,
+        len = 1,
+        start = 0,
+        lineno = 0,
+        y = text.y;
+    while (text.str[start + len - 1] != '\0') {
+        while (text.str[start + len - 1] != 10 && text.str[start+len-1] != '\0') {
+            len ++;
+        }
+        status = cairo_scaled_font_text_to_glyphs(
+            sft, x, y, text.str + start, len, 
+            &glyphs, &nglyphs,
+            NULL, NULL, NULL
+        );
+        if (status == CAIRO_STATUS_SUCCESS) {
+            cairo_show_glyphs(ctx, glyphs, nglyphs);
+            cairo_glyph_free(glyphs);
+            nglyphs = 0;
+        }
+        start += len;
+        len = 1;
+        y += text.size;
+        lineno ++;
+    }
+    cairo_scaled_font_destroy(sft);
+}
+
+/*
  * Draws the given text onto the cairo context
  */
 static void draw_text(cairo_t *ctx, text_t text) {
@@ -310,9 +355,7 @@ static void draw_text(cairo_t *ctx, text_t text) {
     }
 
     cairo_set_source_rgba(ctx, text.color.red, text.color.green, text.color.blue, text.color.alpha);
-    cairo_move_to(ctx, x, text.y);
-    cairo_show_text(ctx, text.str);
-
+    draw_text_multi_line(ctx, text, x);
     cairo_stroke(ctx);
 }
 
