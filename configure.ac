@@ -2,7 +2,7 @@
 # Run autoreconf -fi to generate a configure script from this file.
 
 AC_PREREQ([2.69])
-AC_INIT([i3lock-color], [m4_esyscmd_s([cat I3LOCK_VERSION])], [https://github.com/Raymo11/i3lock-color/issues])
+AC_INIT([i3lock-color],[m4_esyscmd_s([cat I3LOCK_VERSION])],[https://github.com/Raymo11/i3lock-color/issues])
 # For AX_EXTEND_SRCDIR
 AX_ENABLE_BUILDDIR
 AM_INIT_AUTOMAKE([foreign subdir-objects -Wall no-dist-gzip dist-bzip2])
@@ -50,7 +50,7 @@ dnl is_release must be lowercase because AX_CHECK_ENABLE_DEBUG calls m4_tolower
 dnl on its fourth argument.
 AX_CHECK_ENABLE_DEBUG([yes], , [UNUSED_NDEBUG], [$is_release])
 
-AC_PROG_CC_C99
+AC_PROG_CC
 
 # For strnlen() and vasprintf().
 AC_USE_SYSTEM_EXTENSIONS
@@ -66,15 +66,22 @@ AC_FUNC_FORK
 AC_FUNC_LSTAT_FOLLOWS_SLASHED_SYMLINK
 AC_FUNC_STRNLEN
 AC_CHECK_FUNCS([atexit dup2 ftruncate getcwd gettimeofday localtime_r memchr memset mkdir rmdir setlocale socket strcasecmp strchr strdup strerror strncasecmp strndup strrchr strspn strstr strtol strtoul], , [AC_MSG_FAILURE([cannot find the $ac_func function, which i3lock requires])])
+AC_CHECK_FUNCS([explicit_bzero])
 
-# Checks for libraries.
-
+# Check for libraries
 AC_SEARCH_LIBS([floor], [m], , [AC_MSG_FAILURE([cannot find the required floor() function despite trying to link with -lm])])
 
 # libev does not ship with a pkg-config file :(.
 AC_SEARCH_LIBS([ev_run], [ev], , [AC_MSG_FAILURE([cannot find the required ev_run() function despite trying to link with -lev])])
 
 AC_SEARCH_LIBS([shm_open], [rt])
+
+# Use system-local-login instead of login on Arch and Gentoo
+if [[ -f /etc/arch-release ]] || [[ -f /etc/gentoo-release ]]; then
+    echo "Using PAM for Arch/Gentoo"
+    sed -i "s/^#auth include system-local-login/auth include system-local-login/g" ../pam/i3lock
+    sed -i "s/^auth include login/#auth include login/g" ../pam/i3lock
+fi
 
 # Only disable PAM on OpenBSD where i3lock uses BSD Auth instead
 case "$host" in

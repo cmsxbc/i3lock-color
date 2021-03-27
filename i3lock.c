@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <pwd.h>
 #include <sys/types.h>
-#include <string.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -45,7 +44,7 @@
 #include <xkbcommon/xkbcommon-x11.h>
 #include <cairo.h>
 #include <cairo/cairo-xcb.h>
-#ifdef __OpenBSD__
+#ifdef HAVE_EXPLICIT_BZERO
 #include <strings.h> /* explicit_bzero(3) */
 #endif
 #include <xcb/xcb_aux.h>
@@ -91,16 +90,27 @@ char bshlcolor[9] = "db3300ff";
 char separatorcolor[9] = "000000ff";
 char greetercolor[9] = "000000ff";
 
+char verifoutlinecolor[9] = "00000000";
+char wrongoutlinecolor[9] = "00000000";
+char layoutoutlinecolor[9] = "00000000";
+char timeoutlinecolor[9] = "00000000";
+char dateoutlinecolor[9] = "00000000";
+char greeteroutlinecolor[9] = "00000000";
+
 /* int defining which display the lock indicator should be shown on. If -1, then show on all displays.*/
 int screen_number = 0;
+
 /* default is to use the supplied line color, 1 will be ring color, 2 will be to use the inside color for ver/wrong/etc */
 int internal_line_source = 0;
-/* bool for showing the clock; why am I commenting this? */
+
+/* refresh rate in seconds, default to 1s */
+float refresh_rate = 1.0;
+
 bool show_clock = false;
 bool slideshow_enabled = false;
 bool always_show_clock = false;
 bool show_indicator = false;
-float refresh_rate = 1.0;
+bool show_modkey_text = true;
 
 /* there's some issues with compositing - upstream removed support for this, but we'll allow people to supply an arg to enable it */
 bool composite = false;
@@ -168,6 +178,14 @@ double layout_size = 14.0;
 double circle_radius = 90.0;
 double ring_width = 7.0;
 double greeter_size = 32.0;
+
+double timeoutlinewidth = 0;
+double dateoutlinewidth = 0;
+double verifoutlinewidth = 0;
+double wrongoutlinewidth = 0;
+double modifieroutlinewidth = 0;
+double layoutoutlinewidth = 0;
+double greeteroutlinewidth = 0;
 
 char* verif_text = "verifying…";
 char* wrong_text = "wrong!";
@@ -244,24 +262,29 @@ pthread_t draw_thread;
 // allow you to disable. handy if you use bar with lots of crap.
 bool redraw_thread = false;
 
+// experimental bar stuff
 #define BAR_VERT 0
 #define BAR_FLAT 1
 #define BAR_DEFAULT 0
 #define BAR_REVERSED 1
 #define BAR_BIDIRECTIONAL 2
-// experimental bar stuff
+#define MAX_BAR_COUNT 65535
+#define MIN_BAR_COUNT 1
+
 bool bar_enabled = false;
 double *bar_heights = NULL;
 double bar_step = 15;
 double bar_base_height = 25;
 double bar_periodic_step = 15;
 double max_bar_height = 25;
-int num_bars = 0;
-int bar_width = 150;
+int bar_count = 0;
+int bar_width = 0;
 int bar_orientation = BAR_FLAT;
 
 char bar_base_color[9] = "000000ff";
-char bar_expr[32] = "0\0";
+char bar_x_expr[32] = "0";
+char bar_y_expr[32] = ""; // empty string on y means use x as offset based on orientation
+char bar_width_expr[32] = ""; // empty string means full width based on bar orientation
 bool bar_bidirectional = false;
 bool bar_reversed = false;
 
@@ -297,12 +320,13 @@ static void u8_dec(char *s, int *i) {
  */
 static char* get_keylayoutname(int mode, xcb_connection_t* conn) {
     if (mode < 0 || mode > 2) return NULL;
-    char* newans = NULL, *answer = xcb_get_key_group_names(conn);
+    char *newans = NULL, *newans2 = NULL, *answer = xcb_get_key_group_names(conn);
+    int substringStart = 0, substringEnd = 0, size = 0;
     DEBUG("keylayout answer is: [%s]\n", answer);
     switch (mode) {
         case 1:
             // truncate the string at the first parens
-            for(int i = 0; answer[i] != '\0'; ++i) {
+            for (int i = 0; answer[i] != '\0'; ++i) {
                 if (answer[i] == '(') {
                     if (i != 0 && answer[i - 1] == ' ') {
                         answer[i - 1] = '\0';
@@ -315,16 +339,23 @@ static char* get_keylayoutname(int mode, xcb_connection_t* conn) {
             }
             break;
         case 2:
-            for(int i = 0; answer[i] != '\0'; ++i) {
+            for (int i = 0; answer[i] != '\0'; ++i) {
                 if (answer[i] == '(') {
                     newans = &answer[i + 1];
+                    substringStart = i + 1;
                 } else if (answer[i] == ')' && newans != NULL) {
                     answer[i] = '\0';
+                    substringEnd = i;
                     break;
                 }
             }
-            if (newans != NULL)
-                answer = newans;
+            if (newans != NULL) {
+                size = sizeof(char) * (substringEnd - substringStart + 1);
+                newans2 = malloc(size);
+                memcpy(newans2, newans, size);
+                free(answer);
+                answer = newans2;
+            }
             break;
         case 0:
             // fall through
@@ -405,7 +436,7 @@ static bool load_compose_table(const char *locale) {
  *
  */
 static void clear_password_memory(void) {
-#ifdef __OpenBSD__
+#ifdef HAVE_EXPLICIT_BZERO
     /* Use explicit_bzero(3) which was explicitly designed not to be
      * optimized out by the compiler. */
     explicit_bzero(password, strlen(password));
@@ -569,13 +600,15 @@ static void input_done(void) {
         else if (strcmp(mod_name, XKB_MOD_NAME_LOGO) == 0)
             mod_name = "Super";
 
-        char *tmp;
-        if (modifier_string == NULL) {
-            if (asprintf(&tmp, "%s", mod_name) != -1)
+        if (show_modkey_text) {
+            char *tmp;
+            if (modifier_string == NULL) {
+                if (asprintf(&tmp, "%s", mod_name) != -1)
+                    modifier_string = tmp;
+            } else if (asprintf(&tmp, "%s, %s", modifier_string, mod_name) != -1) {
+                free(modifier_string);
                 modifier_string = tmp;
-        } else if (asprintf(&tmp, "%s, %s", modifier_string, mod_name) != -1) {
-            free(modifier_string);
-            modifier_string = tmp;
+            }
         }
     }
 
@@ -894,6 +927,10 @@ static void process_xkb_event(xcb_generic_event_t *gevent) {
                                   event->state_notify.baseGroup,
                                   event->state_notify.latchedGroup,
                                   event->state_notify.lockedGroup);
+  			if (layout_text != NULL) {
+                  free(layout_text);
+                  layout_text = NULL;
+            }
             layout_text = get_keylayoutname(keylayout_mode, conn);
             redraw_screen();
             break;
@@ -906,7 +943,7 @@ static void process_xkb_event(xcb_generic_event_t *gevent) {
  * and also redraw the image, if any.
  *
  */
-void handle_screen_resize(void) {
+static void handle_screen_resize(void) {
     xcb_get_geometry_cookie_t geomc;
     xcb_get_geometry_reply_t *geom;
     geomc = xcb_get_geometry(conn, screen->root);
@@ -1218,7 +1255,7 @@ static void xcb_check_cb(EV_P_ ev_check *w, int revents) {
 
                     /* In the parent process, we exit */
                     if (fork() != 0)
-                        exit(0);
+                        exit(EXIT_SUCCESS);
 
                     ev_loop_fork(EV_DEFAULT);
                 }
@@ -1345,7 +1382,7 @@ static void load_slideshow_images(const char *path, char *image_raw_format) {
     d = opendir(path);
     if (d == NULL) {
         printf("Could not open directory: %s\n", path);
-        exit(0);
+        exit(EXIT_SUCCESS);
     }
 
     while ((dir = readdir(d)) != NULL) {
@@ -1418,6 +1455,14 @@ int main(int argc, char *argv[]) {
         {"separatorcolor", required_argument, NULL, 314},
         {"greetercolor", required_argument, NULL, 315},
 
+        // text outline colors
+        {"verifoutlinecolor", required_argument, NULL, 316},
+        {"wrongoutlinecolor", required_argument, NULL, 317},
+        {"layoutoutlinecolor", required_argument, NULL, 318},
+        {"timeoutlinecolor", required_argument, NULL, 319},
+        {"dateoutlinecolor", required_argument, NULL, 320},
+        {"greeteroutlinecolor", required_argument, NULL, 321},
+
         {"line-uses-ring", no_argument, NULL, 'r'},
         {"line-uses-inside", no_argument, NULL, 's'},
 
@@ -1448,6 +1493,7 @@ int main(int argc, char *argv[]) {
         {"locktext", required_argument, NULL, 516},
         {"lockfailedtext", required_argument, NULL, 517},
         {"greetertext", required_argument, NULL, 518},
+        {"no-modkeytext", no_argument, NULL, 519},
 
         // fonts
         {"time-font", required_argument, NULL, 520},
@@ -1477,6 +1523,15 @@ int main(int argc, char *argv[]) {
         {"indpos", required_argument, NULL, 547},
         {"greeterpos", required_argument, NULL, 548},
 
+        // text outline width
+        {"timeoutlinewidth", required_argument, NULL, 560},
+        {"dateoutlinewidth", required_argument, NULL, 561},
+        {"verifoutlinewidth", required_argument, NULL, 562},
+        {"wrongoutlinewidth", required_argument, NULL, 563},
+        {"modifieroutlinewidth", required_argument, NULL, 564},
+        {"layoutoutlinewidth", required_argument, NULL, 565},
+        {"greeteroutlinewidth", required_argument, NULL, 566},
+
 		// pass keys
         {"pass-media-keys", no_argument, NULL, 601},
         {"pass-screen-keys", no_argument, NULL, 602},
@@ -1494,6 +1549,8 @@ int main(int argc, char *argv[]) {
         {"bar-color", required_argument, NULL, 707},
         {"bar-periodic-step", required_argument, NULL, 708},
         {"bar-position", required_argument, NULL, 709},
+        {"bar-count", required_argument, NULL, 710},
+        {"bar-total-width", required_argument, NULL, 711},
 
         // misc.
         {"redraw-thread", no_argument, NULL, 900},
@@ -1511,6 +1568,8 @@ int main(int argc, char *argv[]) {
         err(EXIT_FAILURE, "getpwuid() failed");
     if ((username = pw->pw_name) == NULL)
         errx(EXIT_FAILURE, "pw->pw_name is NULL.");
+    if (getenv("WAYLAND_DISPLAY") != NULL)
+        errx(EXIT_FAILURE, "i3lock is a program for X11 and does not work on Wayland. Try https://github.com/swaywm/swaylock instead");
 
     char *optstring = "hvnbdc:p:ui:tCeI:frsS:kB:m";
     char *arg = NULL;
@@ -1527,6 +1586,15 @@ int main(int argc, char *argv[]) {
     }\
     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", acolor) != 1)\
         errx(1, #acolor " is invalid, color must be given in 3 or 4-byte format: rrggbb[aa]\n");
+
+#define parse_outline_width(awidth)\
+    arg = optarg;\
+    if (sscanf(arg, "%lf", &awidth) != 1)\
+        errx(1, #awidth " must be a number\n");\
+    if (awidth < 0) {\
+        fprintf(stderr, #awidth " must be a positive double; ignoring...\n");\
+        awidth = 0;\
+    }
 
     while ((o = getopt_long(argc, argv, optstring, longopts, &longoptind)) != -1) {
         switch (o) {
@@ -1654,6 +1722,25 @@ int main(int argc, char *argv[]) {
             case 315:
                 parse_color(greetercolor);
                 break;
+            case  316:
+                parse_color(verifoutlinecolor);
+                break;
+            case  317:
+                parse_color(wrongoutlinecolor);
+                break;
+            case  318:
+                parse_color(layoutoutlinecolor);
+                break;
+            case  319:
+                parse_color(timeoutlinecolor);
+                break;
+            case  320:
+                parse_color(dateoutlinecolor);
+                break;
+            case  321:
+                parse_color(greeteroutlinecolor);
+                break;
+
 
 			// General indicator opts
             case 400:
@@ -1755,6 +1842,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 518:
                 greeter_text = optarg;
+                break;
+            case 519:
+                show_modkey_text = false;
                 break;
 
 			// Font stuff
@@ -1948,6 +2038,30 @@ int main(int argc, char *argv[]) {
                 }
                 break;
 
+            // text outline width
+            case 560:
+                parse_outline_width(timeoutlinewidth);
+                break;
+            case 561:
+                parse_outline_width(dateoutlinewidth);
+                break;
+            case 562:
+                parse_outline_width(verifoutlinewidth);
+                break;
+            case 563:
+                parse_outline_width(wrongoutlinewidth);
+                break;
+            case 564:
+                parse_outline_width(modifieroutlinewidth);
+                break;
+            case 565:
+                parse_outline_width(layoutoutlinewidth);
+                break;
+            case 566:
+                parse_outline_width(greeteroutlinewidth);
+                break;
+
+
 			// Pass keys
 			case 601:
 				pass_media_keys = true;
@@ -1983,7 +2097,6 @@ int main(int argc, char *argv[]) {
             case 702:
                 bar_width = atoi(optarg);
                 if (bar_width < 1) bar_width = 150;
-                // num_bars and bar_heights* initialized later when we grab display info
                 break;
             case 703:
                 arg = optarg;
@@ -2015,14 +2128,21 @@ int main(int argc, char *argv[]) {
                     bar_periodic_step = opt;
                 break;
             case 709:
-                //read in to ind_x_expr and ind_y_expr
-                if (strlen(optarg) > 31) {
-                    // this is overly restrictive since both the x and y string buffers have size 32, but it's easier to check.
-                    errx(1, "indicator position string can be at most 31 characters\n");
-                }
                 arg = optarg;
-                if (sscanf(arg, "%31s", bar_expr) != 1) {
-                    errx(1, "bar-position must be of the form [pos] with a max length of 31\n");
+                if (sscanf(arg, "%31[^:]:%31[^:]", bar_x_expr, bar_y_expr) < 1) {
+                    errx(1, "bar-position must be a single number or of the form x:y with a max length of 31\n");
+                }
+                break;
+            case 710:
+                bar_count = atoi(optarg);
+                if (bar_count > MAX_BAR_COUNT || bar_count < MIN_BAR_COUNT) {
+                    errx(1, "bar-count must be between %d and %d\n", MIN_BAR_COUNT, MAX_BAR_COUNT);
+                }
+                break;
+            case 711:
+                arg = optarg;
+                if (sscanf(arg, "%31s", bar_width_expr) != 1) {
+                    errx(1, "missing argument for bar-total-width\n");
                 }
                 break;
 
@@ -2099,8 +2219,6 @@ int main(int argc, char *argv[]) {
         xcb_connection_has_error(conn))
             errx(EXIT_FAILURE, "Could not connect to X11, maybe you need to set DISPLAY?");
 
-
-
     if (xkb_x11_setup_xkb_extension(conn,
                                     XKB_X11_MIN_MAJOR_XKB_VERSION,
                                     XKB_X11_MIN_MINOR_XKB_VERSION,
@@ -2173,13 +2291,28 @@ int main(int argc, char *argv[]) {
     last_resolution[0] = screen->width_in_pixels;
     last_resolution[1] = screen->height_in_pixels;
 
-    if (bar_enabled && bar_width > 0) {
-        int tmp = screen->width_in_pixels;
-        if (bar_orientation == BAR_VERT) tmp = screen->height_in_pixels;
-        num_bars = tmp / bar_width;
-        if (tmp % bar_width != 0) ++num_bars;
+    if (bar_enabled) {
+        if (bar_count == 0) {
+            if (bar_width != 0) {
+                fprintf(stderr, "Warning: bar-width is deprecated, use bar-count instead\n");
+                int tmp = screen->width_in_pixels;
+                if (bar_orientation == BAR_VERT) tmp = screen->height_in_pixels;
+                bar_count = tmp / bar_width;
+                if (tmp % bar_width != 0) {
+                    ++bar_count;
+                }
+            } else {
+                bar_count = 10;
+            }
+        } else if (bar_width != 0) {
+            errx(EXIT_FAILURE, "bar-width and bar-count cannot be used at the same time");
+        }
 
-        bar_heights = (double*) calloc(num_bars, sizeof(double));
+        if (bar_count >= MIN_BAR_COUNT && bar_count <= MAX_BAR_COUNT) {
+            bar_heights = (double*) calloc(bar_count, sizeof(double));
+        } else {
+            bar_enabled = false;
+        }
     }
 
     xcb_change_window_attributes(conn, screen->root, XCB_CW_EVENT_MASK,

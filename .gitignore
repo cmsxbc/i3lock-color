@@ -3,6 +3,7 @@ i3lock
 tags
 *.swp
 *.gz
+*~
 
 ################################################################################
 # https://raw.githubusercontent.com/github/gitignore/master/Autotools.gitignore
@@ -30,4 +31,3 @@ Makefile.in
 /install-sh
 /missing
 /stamp-h1
-*.in~

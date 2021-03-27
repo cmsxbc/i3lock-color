@@ -1,10 +1,7 @@
 #!/bin/bash
-autoreconf -fiv
+./build.sh
 
-rm -rf build/
-mkdir -p build && cd build/
-
-../configure --prefix=/usr --sysconfdir=/etc
+cd build
 
 sudo make install
 
