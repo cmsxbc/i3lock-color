@@ -329,7 +329,7 @@ static void draw_text_multi_line(cairo_t *ctx, text_t text, double x) {
         lineno = 0,
         y = text.y;
     while (text.str[start + len - 1] != '\0') {
-        while (text.str[start + len - 1] != 10 && text.str[start+len-1] != '\0') {
+        while (text.str[start + len - 1] != '\n' && text.str[start+len-1] != '\0') {
             len ++;
         }
         status = cairo_scaled_font_text_to_glyphs(
